@@ -1,1 +1,8 @@
 streamlit
+openai>=1.40.0
+groq
+langchain
+langchain-core
+langchain-groq
+pydantic>=2
+requests
