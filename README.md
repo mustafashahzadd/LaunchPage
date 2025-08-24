@@ -98,12 +98,19 @@ Unlike Jasper, Copy.ai, Perplexity, Webflow AI, or TubeBuddy:
 
 **👥 Team**
 
-👤 Mustafa Shahzad
-👤 Ali Soban
-👤 Muhammad Hasheem Iftikhar
-👤 Abdullah Abid
-👤 Taha Sharif
-👤 Muhammad Alyan
+👤 Mustafa Shahzad : https://www.linkedin.com/in/mustafa-shahzad-1a0279232/<img width="1047" height="76" alt="image" src="https://github.com/user-attachments/assets/d1ba34f1-6fb8-4ec5-9cbf-15097303f6e5" />
+
+👤 Ali Soban: https://www.linkedin.com/in/ali-soban-/<img width="725" height="76" alt="image" src="https://github.com/user-attachments/assets/ff2a67c9-40dc-493a-8392-640055db4489" />
+
+👤 Muhammad Hasheem Iftikhar: https://www.linkedin.com/in/muhammad-hasheem-iftikhar/<img width="1137" height="76" alt="image" src="https://github.com/user-attachments/assets/a89fbb2c-79eb-44a9-8dcb-2d98779d461f" />
+
+👤 Abdullah Abid https://www.linkedin.com/in/abdullahabid2003/ <img width="858" height="76" alt="image" src="https://github.com/user-attachments/assets/94b32877-d98f-4223-81cc-d661ccb681e3" />
+
+👤 Taha Sharif: https://www.linkedin.com/in/taha-sharif-53835125b/<img width="942" height="76" alt="image" src="https://github.com/user-attachments/assets/8b039ee7-f32e-46aa-80de-db0a22daf558" />
+
+👤 Muhammad Alyan: https://www.linkedin.com/in/muhammad-alyan-8b6a81250/
+<img width="1131" height="87" alt="image" src="https://github.com/user-attachments/assets/546ecfa7-3405-4700-8fd3-0f3e74859bd5" />
+
 
 **📜 License**
 
@@ -119,5 +126,5 @@ This README now has:
 - ✅ Placeholder image for demo snapshot (can replace with your real screenshot later)  
 - ✅ Polished formatting  
 
-Do you want me to also **generate a professional cover image in wide GitHub banner style** (like the one for hackathon form, but optimized for repos)?
+
 
