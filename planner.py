@@ -1,25 +1,23 @@
 # =============================
-# planner.py (plain-English output)
+# planner.py (plain-English output) — OpenAI version
 # =============================
 import textwrap
-from groq import Groq
+from openai import OpenAI
+
+
 
 
 def make_plan(api_key: str,
               product: str,
               audience: str,
               brief: str,
-              research: str,  # now accepts the plain-English research text
+              research: str,
               repo_name: str,
               repo_desc: str,
               private: bool,
               license: str,
               add_ci: bool) -> str:
-    """
-    Returns a plain-English, human-friendly execution plan as a single Markdown string.
-    NO JSON. Designed to be readable and copyable by non-technical users.
-    """
-    client = Groq(api_key=api_key)
+    client = OpenAI(api_key=api_key)
 
     system = (
         "You are a product planner.\n"
@@ -29,39 +27,33 @@ def make_plan(api_key: str,
         "Use short sentences and keep each bullet under 18 words.\n"
     )
 
-    user = textwrap.dedent(f"""
-        Based on this prior research (verbatim below), create a concise plan for a landing page project.
+    user = f"""
+Based on this prior research (verbatim below), create a concise plan for a landing page project.
 
-        --- Research ---
-        {research}
-        --- End Research ---
+--- Research ---
+{research}
+--- End Research ---
 
-        Product: {product}
-        Audience: {audience}
-        Brief: {brief}
-        Repo: name={repo_name}, desc={repo_desc}, private={private}, license={license}, CI={add_ci}
+Product: {product}
+Audience: {audience}
+Brief: {brief}
+Repo: name={repo_name}, desc={repo_desc}, private={private}, license={license}, CI={add_ci}
 
-        Please produce:
-        # One-Line Strategy — 1 sentence
-        # Milestones — 5 bullets; each bullet: title — goal — owner (placeholder) — ETA in days
-        # Success Metrics — 6 bullets, measurable
-        # Copy Outline — list sections in order (Hero, Quickstart, Features, Playground, FAQ, Footer + any others)
-        # Risks & Mitigations — 3 bullets
-        # Repo Settings — short bullets for privacy, license, CI choice
+Please produce:
+# One-Line Strategy — 1 sentence
+# Milestones — 5 bullets; each: title — goal — owner (placeholder) — ETA in days
+# Success Metrics — 6 bullets, measurable
+# Copy Outline — sections in order (Hero, Quickstart, Features, Playground, FAQ, Footer + any others)
+# Risks & Mitigations — 3 bullets
+# Repo Settings — short bullets for privacy, license, CI choice
 
-        Only return the Markdown. No JSON.
-    """)
+Only return the Markdown. No JSON.
+""".strip()
 
-    resp = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        temperature=0.2,
-        max_tokens=1600,
+    resp = client.responses.create(
+        model="gpt-5",
+        input=f"{system}\n\n{user}",
     )
 
-    text = resp.choices[0].message.content or ""
-    text = text.replace("```", "").strip()
+    text = (resp.output_text or "").replace("```", "").strip()
     return text

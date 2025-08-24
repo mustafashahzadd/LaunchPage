@@ -1,744 +1,1176 @@
-# merged_app.py — Unified UI for Launch Builder (R1) + Workshop Planner (R2)
-# Keeps all features; adds R1 markdown parsers + R2 normalizers so the UI always works.
-
-import io, json, zipfile, re
-import datetime as dt
-from typing import Any, Dict, List, Optional
-
+# app.py - Unified AI Project Hub with consistent theming (fixed Feature 3 display + cleaned call flow)
 import streamlit as st
+import io
+import zipfile
+import json
+import tempfile
+import os
+from datetime import datetime
+import datetime as dt
 
-# ============== Optional deps ==============
+# --- Optional imports ---
 try:
-    from ics import Calendar, Event
-    ICS_AVAILABLE = True
+    from forms_api import create_google_form  # used by Workshop (optional)
 except Exception:
-    ICS_AVAILABLE = False
+    def create_google_form(*args, **kwargs):
+        return None
 
-# ============== R1 (Launch) imports =========
-# Functions — import the callables (NOT the modules)
 try:
-    from research import make_research as r1_make_research
-    from planner  import make_plan     as r1_make_plan
-    from production import (
-        make_landing_assets as r1_make_assets,
-        generate_custom_file as r1_generate_custom_file,
-    )
+    from producer_blog import create_docx_file, create_pdf_file
+except Exception:
+    create_docx_file = None
+    create_pdf_file = None
+
+# =========================
+# Page configuration & Theme
+# =========================
+st.set_page_config(
+    page_title="ActionPlanner AI",
+    page_icon="🚀",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+st.markdown(
+    """
+<style>
+    /* Main theme colors */
+    :root {
+        --primary: #2E86AB;
+        --secondary: #A23B72;
+        --success: #28a745;
+        --warning: #ffc107;
+        --info: #17a2b8;
+        --dark: #2c3e50;
+        --light: #f8f9fa;
+    }
+
+    /* Consistent button styling */
+    .stButton > button {
+        border-radius: 8px;
+        font-weight: 600;
+        transition: all 0.3s ease;
+    }
+    .stButton > button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    }
+
+    /* Tab styling */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+        background-color: #f0f2f6;
+        padding: 4px;
+        border-radius: 12px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 8px;
+        padding: 8px 16px;
+        font-weight: 500;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: white;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+
+    /* Cards */
+    .info-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 1.5rem;
+        border-radius: 12px;
+        margin-bottom: 1.5rem;
+    }
+    .feature-card {
+        background: white;
+        padding: 1.5rem;
+        border-radius: 12px;
+        border: 1px solid #e0e0e0;
+        margin-bottom: 1rem;
+        transition: transform 0.3s ease;
+    }
+    .feature-card:hover {
+        transform: translateY(-4px);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    }
+
+    /* Progress chips */
+    .progress-step {
+        display: inline-block;
+        padding: 0.5rem 1rem;
+        border-radius: 20px;
+        margin: 0 0.25rem;
+        font-weight: 500;
+    }
+    .progress-step.active { background: var(--primary); color: white; }
+    .progress-step.completed { background: var(--success); color: white; }
+
+    /* File grid */
+    .file-item {
+        padding: 0.75rem;
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        cursor: pointer;
+        transition: all 0.3s ease;
+    }
+    .file-item:hover { background: #f0f2f6; border-color: var(--primary); }
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+# =========================
+# Session State
+# =========================
+if "launch" not in st.session_state:
+    st.session_state.launch = {
+        "project_data": {},
+        "research": {},
+        "plan": {},
+        "files": {},
+        "custom_files": [],
+        "file_count": 0,
+    }
+
+if "workshop" not in st.session_state:
+    st.session_state.workshop = {
+        "research": None,
+        "plan": None,
+        "assets": None,
+        "date": None,
+        "days_until": None,
+    }
+
+if "research_blog" not in st.session_state:
+    st.session_state.research_blog = {
+        "research_content": None,
+        "letter_structure": None,
+        "blog_structure": None,
+        "final_assets": None,
+    }
+
+# =========================
+# Dynamic imports with fallbacks
+# =========================
+try:
+    # Launch Builder imports
+    from research import make_research
+    from planner import make_plan
+    from production import make_landing_assets, generate_custom_file
     from github_client import GitHubClient
 except Exception:
-    # Quiet stubs keep the UI usable even if imports fail
-    def r1_make_research(*a, **k): return ""
-    def r1_make_plan(*a, **k):     return ""
-    def r1_make_assets(*a, **k):   return {}
-    def r1_generate_custom_file(*a, **k): return ""
-    class GitHubClient:  # minimal stub
-        def __init__(self, *a, **k): ...
-        def get_authed_user(self): return "?"
-        def ensure_repo(self, **k): ...
-        def push_files(self, **k): ...
+    def make_research(*args, **kwargs):
+        return {}
 
-# ============== R2 (Workshop) imports =======
+    def make_plan(*args, **kwargs):
+        return {}
+
+    def make_landing_assets(*args, **kwargs):
+        return {}
+
+    def generate_custom_file(*args, **kwargs):
+        return ""
+
+    class GitHubClient:
+        def __init__(self, *args):
+            pass
+        def get_authenticated_user(self):
+            return {"login": "me"}
+        def create_repo(self, *a, **k):
+            return True
+        def upsert_files(self, *a, **k):
+            return True
+
 try:
-    from researcher_work import make_workshop_research as r2_make_research
-    from planner_work    import make_workshop_plan     as r2_make_plan
-    from producer_work   import make_workshop_assets   as r2_make_assets
-    try:
-        from forms_api import create_google_form as r2_create_google_form
-    except Exception:
-        def r2_create_google_form(*a, **k): return {"editUrl": None, "responderUrl": None}
+    # Workshop imports
+    from researcher_work import make_workshop_research
+    from planner_work import make_workshop_plan
+    from producer_work import make_workshop_assets
 except Exception:
-    def r2_make_research(*a, **k): return None
-    def r2_make_plan(*a, **k):     return None
-    def r2_make_assets(*a, **k):   return None
-    def r2_create_google_form(*a, **k): return {"editUrl": None, "responderUrl": None}
+    def make_workshop_research(*args, **kwargs):
+        return None
 
-# ======================
-# Page config & Secrets
-# ======================
-st.set_page_config(page_title="AI Project Hub — Launch + Workshop", page_icon="🧭", layout="wide")
-st.title("🧭 AI Project Hub")
-st.caption("One UI for your Landing Page Builder (R1) and Workshop Planner (R2)")
+    def make_workshop_plan(*args, **kwargs):
+        return None
 
-GROQ_KEY     = st.secrets.get("GROQ_API_KEY", "")
-GITHUB_TOKEN = st.secrets.get("GITHUB_TOKEN", "")
-GITHUB_OWNER = st.secrets.get("GITHUB_OWNER", "")
+    def make_workshop_assets(*args, **kwargs):
+        return None
 
-# ----------------
-# Namespaced state
-# ----------------
-st.session_state.setdefault("launch", {
-    "project_data": {},
-    "research": {},
-    "plan": {},
-    "files": {},
-    "custom_files": [],
-    "file_count": 0,
-})
-st.session_state.setdefault("workshop", {
-    "research": None,
-    "plan": None,
-    "assets": None,
-})
+try:
+    # Research Letter & Blog imports
+    from researcher_blog import make_research_for_letter
+    from planner_blog import make_research_letter, make_blog_post
+    from producer_blog import generate_final_assets  # (create_docx_file/create_pdf_file handled above)
+except Exception:
+    def make_research_for_letter(*args, **kwargs):
+        return None
 
-# ========= small getters =========
-def _safe_get(obj, *names, default=""):
-    """dict or object attribute getter"""
-    if obj is None: return default
-    if isinstance(obj, dict):
-        for n in names:
-            v = obj.get(n)
-            if v: return v
+    def make_research_letter(*args, **kwargs):
+        return None
+
+    def make_blog_post(*args, **kwargs):
+        return None
+
+    def generate_final_assets(*args, **kwargs):
+        return None
+
+# =========================
+# Secrets
+# =========================
+openai_key = st.secrets.get("OPENAI_API_KEY", "")
+github_token = st.secrets.get("GITHUB_TOKEN", "")
+
+if not openai_key:
+    st.error("⚠️ Please add GROQ_API_KEY to .streamlit/secrets.toml")
+    st.stop()
+
+# =========================
+# Header
+# =========================
+st.markdown(
+    """
+<div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 2rem; border-radius: 12px; margin-bottom: 2rem; text-align: center;">
+  <h1 style="color: white; margin: 0;">🚀 Action_Planner AI</h1>
+  <p style="color: rgba(255,255,255,0.9); margin-top: 0.5rem;">From Idea to Launch: Automating Your Creative Vision</p>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+# =========================
+# Sidebar
+# =========================
+with st.sidebar:
+    st.markdown("### 🎯 Select Feature")
+    feature = st.radio(
+        "Choose your tool:",
+        [
+            "🚀 Landing Page Builder",
+            "🎤 Workshop Planner",
+            "📬 Research Letter & Blog",
+        ],
+        label_visibility="collapsed",
+    )
+
+    st.markdown("---")
+    st.markdown("### 📊 Quick Stats")
+    if feature == "🚀 Landing Page Builder":
+        files_count = len(st.session_state.launch.get("files", {}))
+        st.metric("Files Generated", files_count)
+    elif feature == "🎤 Workshop Planner":
+        has_plan = "✅" if st.session_state.workshop.get("plan") else "❌"
+        st.metric("Plan Ready", has_plan)
     else:
-        for n in names:
-            v = getattr(obj, n, None)
-            if v: return v
-    return default
+        has_final = st.session_state.research_blog.get("final_assets")
+        if has_final:
+            # any content?
+            if isinstance(has_final, dict):
+                has_content = bool(
+                    has_final.get("letter_content") or has_final.get("blog_content")
+                )
+            else:
+                has_content = bool(
+                    getattr(has_final, "letter_content", None)
+                    or getattr(has_final, "blog_content", None)
+                )
+            has_content = "✅" if has_content else "❌"
+        else:
+            has_content = "❌"
+        st.metric("Content Ready", has_content)
 
-# ---------- parsing + normalization helpers ----------
-_BUL = re.compile(r"^\s*[-*•]\s+(.*)$", re.M)
+# =========================
+# Feature 1: Landing Page Builder
+# =========================
+if feature == "🚀 Landing Page Builder":
+    st.markdown(
+        """
+    <div class="info-card">
+        <h3>🚀 Landing Page Builder</h3>
+        <p>Create professional landing pages with AI-powered research, planning, and code generation</p>
+    </div>
+    """,
+        unsafe_allow_html=True,
+    )
 
-def _bullets(block: str) -> list[str]:
-    return [m.strip() for m in _BUL.findall(block or "")]
+    tabs = st.tabs(["📝 Configure", "🔍 Research", "📋 Plan", "🏗️ Build", "🚀 Deploy"])
 
-def _section(md: str, heading: str) -> str:
-    md = md or ""
-    h = re.search(rf"^\s*#\s*{re.escape(heading)}\s*$", md, re.I | re.M)
-    if not h: return ""
-    start = h.end()
-    nxt = re.search(r"^\s*#\s+.+$", md[start:], re.M)
-    end = start + (nxt.start() if nxt else len(md)-start)
-    return md[start:end].strip()
-
-def _parse_keywords(block: str) -> list[str]:
-    line = (block or "").splitlines()[0] if block else ""
-    return [s.strip().rstrip(".;:,") for s in re.split(r",|\uFF0C", line) if s.strip()]
-
-# --- R1 (Launch) markdown -> dict ---
-def parse_launch_research(md: str, audience: str) -> dict:
-    comps = []
-    for item in _bullets(_section(md, "Top Competitors"))[:3]:
-        parts = re.split(r"\s+—\s+|\s+-\s+", item, maxsplit=1)
-        comps.append({"name": parts[0].strip(), "angle": parts[1].strip() if len(parts) > 1 else ""})
-    risks = []
-    for item in _bullets(_section(md, "Risks"))[:3]:
-        parts = re.split(r"\s+—\s+|\s+-\s+", item, maxsplit=1)
-        risks.append({"risk": parts[0].strip(), "mitigation": parts[1].strip() if len(parts) > 1 else ""})
-    return {
-        "markdown": (md or "").strip(),
-        "hooks": _bullets(_section(md, "Hooks"))[:5],
-        "keywords": _parse_keywords(_section(md, "Keywords"))[:8],
-        "competitors": comps,
-        "risks": risks,
-        "audience": audience,
-    }
-
-def _parse_milestone_line(line: str) -> dict:
-    parts = re.split(r"\s+—\s+|\s+-\s+", line)
-    parts = [p.strip() for p in parts if p.strip()]
-    title = parts[0] if parts else "Milestone"
-    goal  = parts[1] if len(parts) > 1 else ""
-    owner = parts[2] if len(parts) > 2 else "Owner"
-    m = re.search(r"(\d+)", parts[3] if len(parts) > 3 else "")
-    due_days = int(m.group(1)) if m else None
-    return {"title": title, "goal": goal, "owner": owner, "due_days": due_days, "tasks": []}
-
-def _parse_repo_settings(block: str, defaults: dict) -> dict:
-    repo = dict(defaults)
-    for item in _bullets(block):
-        low = item.lower()
-        if "private" in low or "public" in low: repo["private"] = ("public" not in low)
-        if "license" in low:
-            m = re.search(r"license[:\s]+([A-Za-z0-9.\-]+)", item, re.I)
-            if m: repo["license"] = m.group(1)
-        if "ci" in low or "workflow" in low or "github actions" in low:
-            repo["add_ci"] = ("no" not in low)
-    return repo
-
-def parse_launch_plan(md: str, repo_defaults: dict) -> dict:
-    return {
-        "markdown": (md or "").strip(),
-        "milestones": [_parse_milestone_line(x) for x in _bullets(_section(md, "Milestones"))],
-        "success_metrics": _bullets(_section(md, "Success Metrics")),
-        "copy_outline": _bullets(_section(md, "Copy Outline")) or ["Hero", "Quickstart", "Features", "FAQ", "Footer"],
-        "repo": _parse_repo_settings(_section(md, "Repo Settings"), repo_defaults),
-    }
-
-# --- R2 normalization: model/dict/str -> dict with topics/risks/agenda/etc. ---
-def _to_dict(x) -> dict:
-    if x is None: return {}
-    if isinstance(x, dict): return x
-    if hasattr(x, "model_dump"):
-        try: return x.model_dump()
-        except Exception: pass
-    if hasattr(x, "dict"):
-        try: return x.dict()
-        except Exception: pass
-    try:
-        return {k: v for k, v in vars(x).items() if not k.startswith("_")}
-    except Exception:
-        return {"raw": x}
-
-def normalize_r2_research(x, fallback_text: str = "") -> dict:
-    d = _to_dict(x)
-    topics = d.get("topics") or []
-    risks  = d.get("risks")  or []
-    if not topics or not isinstance(topics, list):
-        text = d.get("text") or d.get("summary") or d.get("markdown") or fallback_text
-        topics = _bullets(_section(text, "Topics")) or _bullets(text)
-    if not risks or not isinstance(risks, list):
-        text = d.get("text") or d.get("summary") or d.get("markdown") or fallback_text
-        candidates = _bullets(_section(text, "Risks")) or _bullets(text)
-        risks = [{"risk": r, "mitigation": ""} for r in candidates[:5]]
-    d["topics"] = topics[:10]
-    d["risks"]  = risks[:10]
-    return d
-
-def normalize_r2_plan(x) -> dict:
-    d = _to_dict(x)
-    if isinstance(d.get("agenda"), str): d["agenda"] = _bullets(d["agenda"])
-    d.setdefault("agenda", [])
-    if isinstance(d.get("success_metrics"), str): d["success_metrics"] = _bullets(d["success_metrics"])
-    d.setdefault("success_metrics", [])
-    if isinstance(d.get("milestones"), str):
-        d["milestones"] = [{"title": line, "tasks": [], "due": ""} for line in _bullets(d["milestones"])]
-    d.setdefault("milestones", [])
-    return d
-
-def normalize_r2_assets(x) -> dict:
-    d = _to_dict(x)
-    d.setdefault("invite_email", d.get("invite") or d.get("email") or "")
-    d.setdefault("poster_text", d.get("poster") or "")
-    d.setdefault("checklist",   d.get("checklist") or "")
-    return d
-
-# ====================================================
-# R1 — Launch Builder (mirrors the optimized builder)
-# ====================================================
-def render_launch():
-    L = st.session_state.launch
-    tabs = st.tabs(["📝 Input", "🔍 Research", "📋 Plan", "🏗️ Build", "🚀 Deploy"])
-
-    # ------- Tab 1: Input -------
+    # 1) Configure
     with tabs[0]:
-        st.header("Project Configuration")
-        c1, c2 = st.columns(2)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("#### Project Details")
+            project_brief = st.text_area(
+                "What do you want to build?",
+                height=100,
+                placeholder="Describe your landing page idea...",
+                key="project_brief",
+            )
+            product_name = st.text_input(
+                "Product Name", placeholder="MyAwesomeAPI", key="product_name"
+            )
+            audience = st.text_input(
+                "Target Audience", placeholder="Developers, Startups", key="audience"
+            )
 
-        with c1:
-            st.subheader("Project Details")
-            brief    = st.text_area("What do you want to build?", height=100, placeholder="Describe your landing page idea…")
-            product  = st.text_input("Product Name", placeholder="MyAwesomeAPI")
-            audience = st.text_input("Target Audience", placeholder="Developers, Startups")
+            # Custom files config
+            st.markdown("#### Custom Files")
+            if "file_count" not in st.session_state:
+                st.session_state.file_count = 0
 
-            st.subheader("Custom Files")
-            ca, cb = st.columns([3,1])
-            with ca: st.write(f"Files configured: {L['file_count']}")
-            with cb:
-                if st.button("➕ Add File", use_container_width=True): L['file_count'] += 1
+            col_a, col_b = st.columns([3, 1])
+            with col_a:
+                st.write(f"Files configured: {st.session_state.file_count}")
+            with col_b:
+                if st.button("➕ Add", key="add_file_btn"):
+                    st.session_state.file_count += 1
 
-            L['custom_files'] = []
-            for i in range(L['file_count']):
-                with st.expander(f"File {i+1}", expanded=True):
-                    f1, f2, f3 = st.columns([2,3,1])
-                    ftype = f1.selectbox("Type", ["HTML","CSS","JS"], key=f"launch_ftype_{i}")
-                    fname = f2.text_input("Filename", f"custom_{i+1}.{ftype.lower()}", key=f"launch_fname_{i}")
-                    if f3.button("🗑️", key=f"launch_del_{i}"):
-                        L['file_count'] = max(0, L['file_count']-1); st.rerun()
-                    fprompt = st.text_area("What should this file do?", height=60, placeholder=f"Describe the {ftype} component…", key=f"launch_fprompt_{i}")
-                    L['custom_files'].append({"type": ftype, "name": fname, "prompt": fprompt})
+            custom_configs = []
+            for i in range(st.session_state.file_count):
+                with st.expander(f"File {i+1}", expanded=False):
+                    fcol1, fcol2, fcol3 = st.columns([2, 3, 1])
+                    with fcol1:
+                        file_type = st.selectbox(
+                            "Type", ["HTML", "CSS", "JS"], key=f"ftype_{i}"
+                        )
+                    with fcol2:
+                        file_name = st.text_input(
+                            "Name", f"custom_{i+1}.{file_type.lower()}", key=f"fname_{i}"
+                        )
+                    with fcol3:
+                        if st.button("🗑️", key=f"del_{i}"):
+                            st.session_state.file_count -= 1
+                            st.rerun()
 
-        with c2:
-            st.subheader("GitHub Settings")
-            gh_owner  = st.text_input("GitHub Username/Org", value=GITHUB_OWNER)
-            repo_name = st.text_input("Repository Name", "landing-page")
-            repo_desc = st.text_input("Description", "AI-generated landing page")
+                    file_prompt = st.text_area(
+                        "Description",
+                        placeholder=f"What should this {file_type} file do?",
+                        key=f"fprompt_{i}",
+                        height=60,
+                    )
+                    custom_configs.append(
+                        {"type": file_type, "name": file_name, "prompt": file_prompt}
+                    )
+
+            st.session_state.launch["custom_files"] = custom_configs
+
+        with col2:
+            st.markdown("#### GitHub Settings")
+            github_owner = st.text_input(
+                "GitHub Username/Org", value=st.secrets.get("GITHUB_OWNER", ""), key="github_owner"
+            )
+            repo_name = st.text_input("Repository Name", "landing-page", key="repo_name")
+            repo_desc = st.text_input(
+                "Description", "AI-generated landing page", key="repo_desc"
+            )
+
             st.divider()
-            private = st.checkbox("Private Repository", True)
-            license = st.selectbox("License", ["MIT", "Apache-2.0", "None"])
-            add_ci  = st.checkbox("Add CI/CD Workflow", False)
-            st.divider()
+            private = st.checkbox("Private Repository", True, key="private")
+            license = st.selectbox("License", ["MIT", "Apache-2.0", "None"], key="license")
+            add_ci = st.checkbox("Add CI/CD", False, key="add_ci")
+
             if st.button("💾 Save Configuration", type="primary", use_container_width=True):
-                L['project_data'] = {
-                    'brief': brief, 'product': product, 'audience': audience,
-                    'github_owner': gh_owner, 'repo_name': repo_name, 'repo_desc': repo_desc,
-                    'private': private, 'license': license, 'add_ci': add_ci,
+                st.session_state.launch["project_data"] = {
+                    "brief": project_brief,
+                    "product": product_name,
+                    "audience": audience,
+                    "github_owner": github_owner,
+                    "repo_name": repo_name,
+                    "repo_desc": repo_desc,
+                    "private": private,
+                    "license": license,
+                    "add_ci": add_ci,
                 }
-                st.success("Configuration saved!")
+                st.success("✅ Configuration saved!")
 
-    # ------- Tab 2: Research -------
+    # 2) Research
     with tabs[1]:
-        st.header("Market Research")
-        data = L['project_data']
-        if not data.get('brief') or not data.get('product'):
-            st.warning("⚠️ Please complete project configuration first")
+        data = st.session_state.launch["project_data"]
+        if not data.get("brief") or not data.get("product"):
+            st.warning("⚠️ Please complete configuration first")
         else:
             if st.button("🔍 Start Research", type="primary", use_container_width=True):
-                with st.spinner("Analyzing market…"):
-                    md = r1_make_research(GROQ_KEY, data['product'], data.get('audience',''), data['brief'])
-                    L['research'] = parse_launch_research(md, data.get('audience',''))
-                st.success("Research complete!")
-            if L['research']:
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.subheader("🎯 Hooks")
-                    for h in L['research'].get('hooks', []): st.write(f"• {h}")
-                    st.subheader("🏆 Competitors")
-                    for comp in L['research'].get('competitors', []):
-                        if isinstance(comp, dict): st.write(f"**{comp.get('name')}**: {comp.get('angle')}")
-                with c2:
-                    st.subheader("🔑 Keywords")
-                    st.info(", ".join(L['research'].get('keywords', [])))
-                    st.subheader("⚠️ Risks")
-                    for r in L['research'].get('risks', []):
-                        if isinstance(r, dict):
-                            with st.expander(r.get('risk','Risk')): st.write(r.get('mitigation',''))
-
-    # ------- Tab 3: Plan -------
-    with tabs[2]:
-        st.header("Project Planning")
-        data = L['project_data']
-        if not data.get('brief'):
-            st.warning("⚠️ Please configure project first")
-        else:
-            if st.button("📋 Create Plan", type="primary", use_container_width=True):
-                with st.spinner("Creating plan…"):
-                    md = r1_make_plan(
-                        GROQ_KEY,
-                        data.get('product','Product'),
-                        data.get('audience','Developers'),
-                        data['brief'],
-                        (L.get('research') or {}).get('markdown', ''),  # pass research TEXT to planner
-                        data.get('repo_name','landing-page'),
-                        data.get('repo_desc','Landing page'),
-                        data.get('private', True),
-                        data.get('license','MIT'),
-                        data.get('add_ci', False),
+                with st.spinner("Analyzing market..."):
+                    research = make_research(
+                        openai_key, data["product"], data.get("audience", ""), data["brief"]
                     )
-                    L['plan'] = parse_launch_plan(md, {
-                        "name": data.get('repo_name','landing-page'),
-                        "desc": data.get('repo_desc','Landing page'),
-                        "private": data.get('private', True),
-                        "license": data.get('license','MIT'),
-                        "add_ci": data.get('add_ci', False),
-                    })
-                st.success("Plan created!")
+                    st.session_state.launch["research"] = research
+                    st.success("✅ Research complete!")
 
-            if L['plan']:
-                plan_obj = L['plan']
-
-                # If the planner (or parser) returned Markdown text, just show it.
-                if isinstance(plan_obj, str):
-                    st.subheader("📄 Plan (Markdown)")
-                    st.markdown(plan_obj)
+            research_data = st.session_state.launch.get("research")
+            if research_data:
+                # If model returned Markdown (string), render it directly.
+                if isinstance(research_data, str):
+                    st.markdown("#### 🔍 Research (Markdown)")
+                    st.markdown(research_data)
                 else:
-                    # ---------- Milestones ----------
-                    st.markdown("### 📅 Milestones")
-                    milestones = (
-                        plan_obj.get("milestones")
-                        or plan_obj.get("Milestones")
-                        or []
+                    # Old structured dict path
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.markdown("#### 🎯 Hooks")
+                        for hook in (research_data.get("hooks", []) or []):
+                            st.write(f"• {hook}")
+
+                        st.markdown("#### 🏆 Competitors")
+                        for comp in (research_data.get("competitors", []) or []):
+                            if isinstance(comp, dict):
+                                st.write(f"**{comp.get('name')}**: {comp.get('angle')}")
+                            else:
+                                st.write(f"• {comp}")
+
+                    with col2:
+                        st.markdown("#### 🔑 Keywords")
+                        keys = research_data.get("keywords", []) or []
+                        if keys:
+                            st.info(", ".join(keys))
+
+                        st.markdown("#### ⚠️ Risks")
+                        for risk in (research_data.get("risks", []) or []):
+                            if isinstance(risk, dict):
+                                with st.expander(risk.get("risk", "Risk")):
+                                    st.write(risk.get("mitigation", ""))
+                            else:
+                                st.write(f"• {risk}")
+
+    # 3) Plan
+    # 3) Plan
+    with tabs[2]:
+        data = st.session_state.launch["project_data"]
+        if data.get("brief"):
+            if st.button("📋 Create Plan", type="primary", use_container_width=True):
+                with st.spinner("Planning..."):
+                    plan = make_plan(
+                        openai_key,
+                        data.get("product", "Product"),
+                        data.get("audience", "Developers"),
+                        data["brief"],
+                        st.session_state.launch.get("research", {}),
+                        data.get("repo_name", "landing-page"),
+                        data.get("repo_desc", "Landing page"),
+                        data.get("private", True),
+                        data.get("license", "MIT"),
+                        data.get("add_ci", False),
                     )
+                    st.session_state.launch["plan"] = plan
+                    st.success("✅ Plan created!")
 
-                    # If parser left milestones as a single string block, just show it
-                    if isinstance(milestones, str):
-                        st.markdown(milestones)
-                    else:
-                        for i, m in enumerate(milestones, 1):
-                            # Be flexible about field names
-                            title = (
-                                (m.get("title") if isinstance(m, dict) else None)
-                                or (m.get("name") if isinstance(m, dict) else None)
-                                or f"Milestone {i}"
-                            )
+            plan_data = st.session_state.launch.get("plan")
+            if plan_data:
+                # If model returned Markdown (string), render it directly.
+                if isinstance(plan_data, str):
+                    st.markdown("#### 📋 Plan (Markdown)")
+                    st.markdown(plan_data)
+                else:
+                    # Old structured dict path
+                    st.markdown("#### 📅 Milestones")
+                    for m in (plan_data.get("milestones", []) or []):
+                        title = m.get("title", "Milestone")
+                        due_days = m.get("due_days", "")
+                        with st.expander(f"{title} - {due_days} days"):
+                            for task in (m.get("tasks", []) or []):
+                                st.write(f"• {task.get('desc')} ({task.get('effort_hrs')}h)")
 
-                            due_days = (m.get("due_days") if isinstance(m, dict) else None) \
-                                       or (m.get("eta_days") if isinstance(m, dict) else None) \
-                                       or (m.get("days") if isinstance(m, dict) else None)
-
-                            due_date = (m.get("due") if isinstance(m, dict) else None) \
-                                       or (m.get("date") if isinstance(m, dict) else None)
-
-                            # Compose header like “Title — Due 2025-09-10 · 7 days”
-                            tags = []
-                            if due_date: tags.append(f"Due {due_date}")
-                            if due_days: tags.append(f"{due_days} days")
-                            header = f"{title}" + (f" — {' · '.join(tags)}" if tags else "")
-
-                            with st.expander(header, expanded=False):
-                                tasks = (
-                                    (m.get("tasks") if isinstance(m, dict) else None)
-                                    or (m.get("subtasks") if isinstance(m, dict) else None)
-                                    or (m.get("items") if isinstance(m, dict) else None)
-                                    or []
-                                )
-                                for t in tasks:
-                                    if isinstance(t, dict):
-                                        desc = t.get("desc") or t.get("task") or t.get("title") or str(t)
-                                        hrs  = t.get("effort_hrs") or t.get("hrs") or t.get("hours")
-                                        st.write(f"• {desc}" + (f" ({hrs}h)" if hrs else ""))
-                                    else:
-                                        st.write(f"• {t}")
-
-                    # ---------- Success Metrics ----------
-                    st.markdown("### 📊 Success Metrics")
-                    metrics = (
-                        plan_obj.get("success_metrics")
-                        or plan_obj.get("metrics")
-                        or plan_obj.get("Success Metrics")
-                        or []
-                    )
-                    if isinstance(metrics, str):
-                        st.markdown(metrics)
-                    else:
-                        cols = st.columns(2)
-                        for i, metric in enumerate(metrics):
-                            with cols[i % 2]:
-                                st.success(str(metric))
-
-
-    # ------- Tab 4: Build -------
-    with tabs[3]:
-        st.header("File Generation")
-        data = L['project_data']
-        if not data.get('brief'):
-            st.warning("⚠️ Please configure project first")
+                    st.markdown("#### 📊 Success Metrics")
+                    for metric in (plan_data.get("success_metrics", []) or []):
+                        st.success(metric)
         else:
+            st.warning("⚠️ Please complete configuration first")
+
+    # 4) Build
+    with tabs[3]:
+        data = st.session_state.launch["project_data"]
+        if data.get("brief"):
             if st.button("🏗️ Generate Files", type="primary", use_container_width=True):
-                with st.spinner("Generating files…"):
-                    files = r1_make_assets(
-                        GROQ_KEY,
-                        data.get('product','Product'),
-                        data.get('audience','Developers'),
-                        data['brief'],
-                        L.get('research', {}),
-                        L.get('plan', {}),
+                with st.spinner("Generating..."):
+                    files = make_landing_assets(
+                        openai_key,
+                        data.get("product", "Product"),
+                        data.get("audience", "Developers"),
+                        data["brief"],
+                        st.session_state.launch.get("research", {}),
+                        st.session_state.launch.get("plan", {}),
                     ) or {}
-                    # Custom files
-                    for custom in L['custom_files']:
-                        if custom.get('prompt'):
-                            content = r1_generate_custom_file(
-                                GROQ_KEY, custom['type'], custom['prompt'],
-                                data.get('product','Product'), L.get('research', {}),
+
+                    # Custom requested files
+                    for custom in st.session_state.launch.get("custom_files", []):
+                        if custom.get("prompt"):
+                            content = generate_custom_file(
+                                openai_key,
+                                custom["type"],
+                                custom["prompt"],
+                                data.get("product", "Product"),
+                                st.session_state.launch.get("research", {}),
                             )
-                            files[custom['name']] = content
-                    L['files'] = files
-                st.success(f"Generated {len(L['files'])} files!")
+                            files[custom["name"]] = content
 
-            if L['files']:
-                st.subheader("📁 Files")
-                names = list(L['files'].keys())
-                pick = st.selectbox("Select file to view:", [""] + names)
-                if pick:
-                    content = L['files'][pick]
-                    c1, c2, _ = st.columns([1,1,4])
-                    with c1:
-                        st.download_button("📥 Download", content, pick, key=f"launch_dl_{pick}")
-                    with c2:
-                        if st.button("✏️ Edit", key=f"launch_edit_{pick}"):
-                            st.session_state[f"launch_editing_{pick}"] = True
-                    if st.session_state.get(f"launch_editing_{pick}"):
-                        edited = st.text_area("Edit content:", content, height=400, key=f"launch_editor_{pick}")
-                        if st.button("Save", key=f"launch_save_{pick}"):
-                            L['files'][pick] = edited
-                            del st.session_state[f"launch_editing_{pick}"]; st.success("Saved!"); st.rerun()
+                    st.session_state.launch["files"] = files
+                    st.success(f"✅ Generated {len(files)} files!")
+
+            if st.session_state.launch["files"]:
+                st.markdown("#### 📁 Generated Files")
+                file_names = list(st.session_state.launch["files"].keys())
+                selected_file = st.selectbox("Select file:", [""] + file_names)
+                if selected_file:
+                    file_content = st.session_state.launch["files"][selected_file]
+                    col1, col2, col3 = st.columns([1, 1, 4])
+                    with col1:
+                        st.download_button("📥 Download", file_content, selected_file)
+                    with col2:
+                        if st.button("✏️ Edit", key=f"edit_{selected_file}"):
+                            st.session_state[f"editing_{selected_file}"] = True
+
+                    if st.session_state.get(f"editing_{selected_file}"):
+                        edited = st.text_area(
+                            "Edit:", file_content, height=400, key=f"editor_{selected_file}"
+                        )
+                        if st.button("Save", key=f"save_{selected_file}"):
+                            st.session_state.launch["files"][selected_file] = edited
+                            del st.session_state[f"editing_{selected_file}"]
+                            st.success("Saved!")
+                            st.rerun()
                     else:
-                        lang = "html" if pick.endswith(".html") else "css" if pick.endswith(".css") else "javascript" if pick.endswith(".js") else "text"
-                        st.code(content, language=lang, line_numbers=True)
+                        lang = (
+                            "html"
+                            if selected_file.endswith(".html")
+                            else "css"
+                            if selected_file.endswith(".css")
+                            else "javascript"
+                            if selected_file.endswith(".js")
+                            else "text"
+                        )
+                        st.code(file_content, language=lang, line_numbers=True)
 
+                # ZIP + Preview
                 st.divider()
-                c1, c2 = st.columns(2)
-                with c1:
-                    zbuf = io.BytesIO()
-                    with zipfile.ZipFile(zbuf, 'w') as z:
-                        for n, c in L['files'].items(): z.writestr(n, c)
-                    zbuf.seek(0)
-                    st.download_button("📦 Download All (ZIP)", zbuf.getvalue(),
-                                       f"landing-{dt.datetime.now().strftime('%Y%m%d')}.zip", "application/zip")
-                with c2:
+                col1, col2 = st.columns(2)
+                with col1:
+                    zip_buffer = io.BytesIO()
+                    with zipfile.ZipFile(zip_buffer, "w") as zf:
+                        for name, content in st.session_state.launch["files"].items():
+                            zf.writestr(name, content)
+                    zip_buffer.seek(0)
+                    st.download_button(
+                        "📦 Download All (ZIP)",
+                        zip_buffer.getvalue(),
+                        f"landing-{datetime.now().strftime('%Y%m%d')}.zip",
+                        "application/zip",
+                        use_container_width=True,
+                    )
+                with col2:
                     if st.button("👁️ Preview", use_container_width=True):
-                        html_files = [n for n in L['files'] if n.endswith('.html')]
-                        if not html_files:
-                            st.warning("No HTML files to preview")
-                        else:
-                            # Combine CSS & JS
-                            all_css = "\n".join([f"/* {n} */\n{L['files'][n]}" for n in L['files'] if n.endswith('.css')])
-                            all_js  = "\n".join([f"// {n}\n{L['files'][n]}" for n in L['files'] if n.endswith('.js')])
+                        html_files = [
+                            f for f in st.session_state.launch["files"].keys() if f.endswith(".html")
+                        ]
+                        if html_files:
+                            all_css = "".join(
+                                [
+                                    f"\n/* {f} */\n{st.session_state.launch['files'][f]}\n"
+                                    for f in st.session_state.launch["files"].keys()
+                                    if f.endswith(".css")
+                                ]
+                            )
+                            all_js = "".join(
+                                [
+                                    f"\n// {f}\n{st.session_state.launch['files'][f]}\n"
+                                    for f in st.session_state.launch["files"].keys()
+                                    if f.endswith(".js")
+                                ]
+                            )
                             for html_file in html_files:
-                                html = L['files'][html_file]
-                                if all_css:
-                                    if '</head>' in html:
-                                        html = html.replace('</head>', f'<style>{all_css}</style>\n</head>')
-                                    elif '<html>' in html:
-                                        html = html.replace('<html>', '<html>\n<head>\n<style>' + all_css + '</style>\n</head>')
-                                    else:
-                                        html = f'<style>{all_css}</style>\n' + html
-                                if all_js:
-                                    if '</body>' in html:
-                                        html = html.replace('</body>', f'<script>{all_js}</script>\n</body>')
-                                    elif '</html>' in html:
-                                        html = html.replace('</html>', f'<script>{all_js}</script>\n</html>')
-                                    else:
-                                        html = html + f"\n<script>{all_js}</script>"
+                                html = st.session_state.launch["files"][html_file]
+                                if all_css and "</head>" in html:
+                                    html = html.replace("</head>", f"<style>{all_css}</style>\n</head>")
+                                if all_js and "</body>" in html:
+                                    html = html.replace("</body>", f"<script>{all_js}</script>\n</body>")
                                 st.subheader(f"Preview: {html_file}")
                                 st.components.v1.html(html, height=700, scrolling=True)
 
-    # ------- Tab 5: Deploy -------
-# ------- Tab 5: Deploy -------
+    # 5) Deploy
     with tabs[4]:
-        st.header("Deployment")
+        if not st.session_state.launch["files"]:
+            st.warning("⚠️ No files to deploy")
+        elif not github_token:
+            st.warning("⚠️ GitHub token not configured")
+        else:
+            data = st.session_state.launch["project_data"]
+            if st.button("🚀 Deploy to GitHub", type="primary", use_container_width=True):
+                try:
+                    with st.spinner("Deploying..."):
+                        gh = GitHubClient(github_token)
+                        owner = data.get("github_owner") or gh.get_authenticated_user()[
+                            "login"
+                        ]
+                        gh.create_repo(
+                            data.get("repo_name", "landing-page"),
+                            data.get("private", True),
+                            data.get("repo_desc", "Landing page"),
+                            auto_init=True,
+                        )
+                        gh.upsert_files(
+                            owner,
+                            data.get("repo_name", "landing-page"),
+                            "main",
+                            st.session_state.launch["files"],
+                        )
+                        st.success(
+                            f"✅ Deployed to github.com/{owner}/{data.get('repo_name')}"
+                        )
+                        st.balloons()
+                except Exception as e:
+                    st.error(f"Error: {str(e)}")
 
-    if not L["files"]:
-        st.warning("⚠️ No files to deploy. Generate files first.")
-    elif not GITHUB_TOKEN:
-        st.warning("⚠️ GitHub token not configured")
-        zbuf = io.BytesIO()
-        with zipfile.ZipFile(zbuf, "w") as z:
-            for n, c in L["files"].items():
-                z.writestr(n, c)
-        zbuf.seek(0)
+# =========================
+# Feature 2: Workshop Planner
+# =========================
+if feature == "🎤 Workshop Planner":
+    st.markdown(
+        """
+    <div class="info-card">
+        <h3>🎤 Workshop Planner</h3>
+        <p>Plan and organize workshops with AI-generated schedules, materials, and registration forms</p>
+    </div>
+    """,
+        unsafe_allow_html=True,
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        goal = st.text_input("Workshop Goal", "1-day AI workshop")
+        audience = st.text_input("Target Audience", "high-school students")
+        workshop_date = st.date_input(
+            "Workshop Date",
+            value=dt.date.today() + dt.timedelta(days=10),
+            min_value=dt.date.today(),
+            help="Select when the workshop will be held",
+        )
+    with col2:
+        constraints = st.text_area("Constraints", "budget < $200; 25 attendees")
+        days_until = (workshop_date - dt.date.today()).days
+        if days_until > 0:
+            st.info(f"📅 Workshop in {days_until} days")
+        elif days_until == 0:
+            st.warning("📅 Workshop is today!")
+        else:
+            st.error(f"📅 Workshop date is in the past ({abs(days_until)} days ago)")
+        st.session_state.workshop["date"] = workshop_date
+        st.session_state.workshop["days_until"] = days_until
+
+    full_goal = f"{goal} in {days_until} days" if days_until > 0 else goal
+
+    # Workflow buttons
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        if st.button("🔍 Research", type="primary", use_container_width=True):
+            with st.spinner("Researching..."):
+                date_context = (
+                    f"Today is {dt.date.today()}. The workshop is scheduled for {workshop_date}."
+                )
+                research = make_workshop_research(
+                    full_goal, audience, constraints, date_context
+                )
+                st.session_state.workshop["research"] = research
+                st.success("✅ Research complete!")
+    with c2:
+        if st.button("📋 Plan", type="primary", use_container_width=True):
+            with st.spinner("Planning..."):
+                date_context = (
+                    f"Today is {dt.date.today()}. The workshop is scheduled for {workshop_date}."
+                )
+                plan = make_workshop_plan(full_goal, audience, constraints, date_context)
+                st.session_state.workshop["plan"] = plan
+                st.success("✅ Plan created!")
+    with c3:
+        if st.button("🎨 Generate Assets", type="primary", use_container_width=True):
+            with st.spinner("Generating..."):
+                date_context = (
+                    f"Today is {dt.date.today()}. The workshop is scheduled for {workshop_date}."
+                )
+                assets = make_workshop_assets(
+                    full_goal,
+                    audience,
+                    constraints,
+                    st.session_state.workshop.get("plan"),
+                    st.session_state.workshop.get("research"),
+                    date_context,
+                )
+                st.session_state.workshop["assets"] = assets
+                st.success("✅ Assets generated!")
+    with c4:
+        if st.button("🔄 Reset", use_container_width=True):
+            st.session_state.workshop = {
+                "research": None,
+                "plan": None,
+                "assets": None,
+                "date": None,
+                "days_until": None,
+            }
+            st.rerun()
+
+    # Research results
+    if st.session_state.workshop.get("research"):
+        st.markdown("#### 🔍 Research Results")
+        research_data = st.session_state.workshop["research"]
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Topics:**")
+            topics = (
+                research_data.get("topics", [])
+                if isinstance(research_data, dict)
+                else getattr(research_data, "topics", [])
+            )
+            for topic in topics[:5]:
+                st.write(f"• {topic}")
+        with col2:
+            st.markdown("**Risks:")
+            risks = (
+                research_data.get("risks", [])
+                if isinstance(research_data, dict)
+                else getattr(research_data, "risks", [])
+            )
+            for risk in risks[:3]:
+                if isinstance(risk, dict):
+                    st.write(f"• {risk.get('risk', risk)}")
+                else:
+                    st.write(f"• {risk}")
+
+    # Plan results
+    if st.session_state.workshop.get("plan"):
+        st.markdown("#### 📋 Plan Details")
+        plan_data = st.session_state.workshop["plan"]
+        agenda = (
+            plan_data.get("agenda", [])
+            if isinstance(plan_data, dict)
+            else getattr(plan_data, "agenda", [])
+        )
+        milestones = (
+            plan_data.get("milestones", [])
+            if isinstance(plan_data, dict)
+            else getattr(plan_data, "milestones", [])
+        )
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Agenda:**")
+            for item in agenda[:5]:
+                st.write(f"• {item}")
+        with col2:
+            st.markdown("**Milestones:**")
+            for milestone in milestones[:3]:
+                if isinstance(milestone, dict):
+                    title = milestone.get("title", "")
+                    due = milestone.get("due", milestone.get("due_days", ""))
+                    if title:
+                        txt = f"**{title}**"
+                        if due:
+                            txt += f" (Due: {due})"
+                        st.write(txt)
+                        tasks = milestone.get("tasks", [])
+                        for task in tasks[:2]:
+                            if isinstance(task, dict):
+                                task_desc = task.get("desc", task.get("description", ""))
+                                if task_desc:
+                                    st.write(f"  - {task_desc}")
+                            elif isinstance(task, str):
+                                st.write(f"  - {task}")
+                elif isinstance(milestone, str):
+                    st.write(f"• {milestone}")
+
+    # Assets (GUARDED: only render when available)
+    if st.session_state.workshop.get("assets"):
+        st.markdown("#### 📧 Generated Assets")
+        assets_data = st.session_state.workshop["assets"]
+        # normalize
+        if isinstance(assets_data, dict):
+            invite = assets_data.get("invite_email", "")
+            poster = assets_data.get("poster_text", "")
+            checklist = assets_data.get("checklist", "")
+            gform = assets_data.get("google_form_url")
+        else:
+            invite = getattr(assets_data, "invite_email", "")
+            poster = getattr(assets_data, "poster_text", "")
+            checklist = getattr(assets_data, "checklist", "")
+            gform = getattr(assets_data, "google_form_url", None)
+
+        invite = invite.replace("\\n", "\n").replace("\\t", "\t")
+        poster = poster.replace("\\n", "\n").replace("\\t", "\t")
+        checklist = checklist.replace("\\n", "\n").replace("\\t", "\t")
+
+        tab1, tab2, tab3 = st.tabs(["📧 Invite Email", "📋 Poster", "✅ Checklist"])
+        with tab1:
+            st.text_area("Invite Email", invite, height=300)
+            st.download_button("📥 Download", invite, "invite_email.txt", "text/plain")
+        with tab2:
+            st.text_area("Poster Text", poster, height=300)
+            st.download_button("📥 Download", poster, "poster.txt", "text/plain")
+        with tab3:
+            st.text_area("Checklist", checklist, height=300)
+            st.download_button("📥 Download", checklist, "checklist.txt", "text/plain")
+
+        if gform:
+            st.markdown("**📋 Registration Form**")
+            st.link_button("Open Google Form", gform)
+            st.text_input("Copy form URL:", value=str(gform), key="form_url_copy")
+
+        st.divider()
+        # Build ZIP with all assets
+        ws = st.session_state.get("workshop", {})
+        ws_date = ws.get("date")
+        ws_days = ws.get("days_until")
+        ws_date_txt = ws_date.strftime("%Y-%m-%d") if isinstance(ws_date, dt.date) else "N/A"
+        ws_days_txt = str(ws_days) if isinstance(ws_days, int) else "N/A"
+
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w") as zf:
+            zf.writestr("invite_email.txt", invite)
+            zf.writestr("poster.txt", poster)
+            zf.writestr("checklist.txt", checklist)
+            zf.writestr(
+                "workshop_info.txt",
+                f"Workshop Date: {ws_date_txt}\nDays until workshop: {ws_days_txt}",
+            )
+            if gform:
+                zf.writestr("google_form_url.txt", str(gform))
+        zip_buffer.seek(0)
         st.download_button(
-            "📦 Download for Manual Deploy",
-            zbuf.getvalue(),
-            f"landing-{dt.datetime.now().strftime('%Y%m%d')}.zip",
+            "📦 Download All Assets",
+            zip_buffer.getvalue(),
+            f"workshop-assets-{ws_date_txt}.zip",
             "application/zip",
         )
+
+# =========================
+# Helper for Feature 3 inline rendering
+# =========================
+
+def _render_research_outputs(assets_data):
+    """Normalize and render Research Letter & Blog outputs immediately inline.
+    Shows tabs + downloads and success message. Safe with dicts/Pydantic objects/objects.
+    """
+    if assets_data is None:
+        return
+
+    # Normalize to dict-like
+    if hasattr(assets_data, "model_dump"):
+        assets = assets_data.model_dump()
+    elif hasattr(assets_data, "dict"):
+        assets = assets_data.dict()
     else:
-        data = L["project_data"]
-        if st.button("🚀 Deploy to GitHub", type="primary", use_container_width=True):
-            with st.spinner("Deploying…"):
-                client = GitHubClient(GITHUB_TOKEN)
+        assets = assets_data
 
-                # --- resolve & sanitize owner ---
-                owner = data.get("github_owner")
-                if not owner:
-                    try:
-                        owner = client.get_authenticated_user()["login"]  # newer name
-                    except AttributeError:
-                        owner = client.get_authed_user()["login"]         # older name
-                owner = (owner or "").strip().strip("/").replace(" ", "").replace("@", "").replace("#", "")
+    # Extract
+    if isinstance(assets, dict):
+        letter_content = str(
+            assets.get("letter_content")
+            or assets.get("letter")
+            or assets.get("email_text")
+            or ""
+        )
+        blog_content = str(
+            assets.get("blog_content")
+            or assets.get("blog")
+            or assets.get("post_markdown")
+            or ""
+        )
+    else:
+        letter_content = str(
+            getattr(assets_data, "letter_content", "")
+            or getattr(assets_data, "letter", "")
+            or getattr(assets_data, "email_text", "")
+        )
+        blog_content = str(
+            getattr(assets_data, "blog_content", "")
+            or getattr(assets_data, "blog", "")
+            or getattr(assets_data, "post_markdown", "")
+        )
 
-                repo    = data.get("repo_name", "landing-page").strip()
-                private = data.get("private", True)
-                desc    = data.get("repo_desc", "Landing page")
+    # Properly unescape literal sequences (do NOT strip real newlines)
+    if letter_content:
+        letter_content = letter_content.replace("\\n", "\n").replace("\\t", "\t")
+    if blog_content:
+        blog_content = blog_content.replace("\\n", "\n").replace("\\t", "\t")
 
-                # --- create/ensure repo (support multiple client signatures) ---
-                create_repo = getattr(client, "create_repo", None) or getattr(client, "ensure_repo", None)
-                if create_repo is None:
-                    raise RuntimeError("GitHubClient missing create/ensure repo method")
+    # Cleanup: remove noisy prefixes and fix headings like "##Heading" -> "## Heading"
+    import re
+    def _clean_markdown(md: str) -> str:
+        if not md:
+            return ""
+        md = re.sub(r"^\s*#{1,6}\s*OUTPUT\s+[AB]:.*\n", "", md, flags=re.I|re.M)
+        md = re.sub(r"^(#{1,6})([^#\s])", r"\1 \2", md, flags=re.M)
+        md = re.sub(r"(?<!\n)\n(#{1,6} )", r"\n\n\1", md)  # ensure blank line before headings
+        return md.strip()
 
+    letter_content = _clean_markdown(letter_content)
+    blog_content   = _clean_markdown(blog_content)
+
+    if not (letter_content or blog_content):
+        st.warning("No content returned from generator.")
+        return
+
+    # One-time beautifier CSS (safe to inject here)
+    st.markdown(
+        """
+        <style>
+        .md-card{
+          background:#fff;border:1px solid #e9eaee;border-radius:14px;
+          padding:1.1rem 1.25rem;box-shadow:0 2px 10px rgba(0,0,0,0.04);margin-bottom:1rem;
+        }
+        .md-card h1,.md-card h2,.md-card h3{margin:0.6rem 0 0.3rem 0;line-height:1.25;}
+        .md-card p{margin:0.4rem 0 1rem 0;}
+        .md-card ul,.md-card ol{margin:0.25rem 0 1rem 1.25rem;}
+        .md-card li{margin:0.2rem 0;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    tab1, tab2 = st.tabs(["📧 Research Letter", "📝 Blog Post"])
+
+    with tab1:
+        st.markdown("#### 📧 Research Letter (Email Ready)")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.download_button(
+                "📄 Download as TXT",
+                letter_content,
+                "research_letter.txt",
+                "text/plain",
+                key="dl_letter_txt",
+            )
+        with c2:
+            if callable(create_docx_file):
+                tmp_docx = tempfile.NamedTemporaryFile(delete=False, suffix=".docx").name
                 try:
-                    # common sig (owner, repo, private, description, auto_init=True)
-                    create_repo(owner, repo, private, desc, auto_init=True)
-                except TypeError:
-                    try:
-                        # alt sig (repo, private, description, auto_init=True)
-                        create_repo(repo, private, desc, auto_init=True)
-                    except TypeError:
-                        # kwargs fallback
-                        create_repo(owner=owner, repo=repo, private=private, description=desc, auto_init=True)
-                except Exception as e:
-                    # if already exists, carry on
-                    if "exists" not in str(e).lower():
-                        raise
+                    create_docx_file(letter_content, tmp_docx)
+                    with open(tmp_docx, "rb") as f:
+                        st.download_button(
+                            "📄 Download as DOCX",
+                            f.read(),
+                            "research_letter.docx",
+                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            key="dl_letter_docx",
+                        )
+                finally:
+                    try: os.unlink(tmp_docx)
+                    except Exception: pass
+        with c3:
+            if callable(create_pdf_file):
+                tmp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name
+                try:
+                    create_pdf_file(letter_content, tmp_pdf)
+                    with open(tmp_pdf, "rb") as f:
+                        st.download_button(
+                            "📑 Download as PDF",
+                            f.read(),
+                            "research_letter.pdf",
+                            "application/pdf",
+                            key="dl_letter_pdf",
+                        )
+                finally:
+                    try: os.unlink(tmp_pdf)
+                    except Exception: pass
 
-                # --- verify branch / reachability ---
-                branch = "main"
-                get_def = getattr(client, "get_default_branch", None)
-                if callable(get_def):
-                    try:
-                        branch = get_def(owner, repo) or branch
-                    except Exception:
-                        # repo likely created under authed user; switch owner
-                        try:
-                            authed = client.get_authenticated_user()["login"]
-                        except Exception:
-                            authed = owner
-                        branch = get_def(authed, repo) or branch
-                        owner = authed
+        # Formatted / Raw toggle
+        view_mode_letter = st.radio(
+            "Letter view", ["Formatted", "Raw"], horizontal=True, key="letter_view_mode"
+        )
+        if view_mode_letter == "Formatted":
+            st.markdown("<div class='md-card'>", unsafe_allow_html=True)
+            st.markdown(letter_content, unsafe_allow_html=False)
+            st.markdown("</div>", unsafe_allow_html=True)
+        else:
+            st.text_area("Letter Content (raw)", letter_content, height=420, key="letter_raw")
 
-                # --- push files (support both method names) ---
-                upsert_files = getattr(client, "upsert_files", None) or getattr(client, "push_files", None)
-                if upsert_files is None:
-                    raise RuntimeError("GitHubClient missing upsert/push files method")
+    with tab2:
+        st.markdown("#### 📝 Blog Post (Web Ready)")
+        st.download_button(
+            "💾 Download Blog Content",
+            blog_content,
+            "blog_post.txt",
+            "text/plain",
+            key="dl_blog_txt",
+        )
 
-                upsert_files(owner, repo, branch, L["files"])
+        view_mode_blog = st.radio(
+            "Blog view", ["Formatted", "Raw"], horizontal=True, key="blog_view_mode"
+        )
+        if view_mode_blog == "Formatted":
+            st.markdown("<div class='md-card'>", unsafe_allow_html=True)
+            st.markdown(blog_content, unsafe_allow_html=False)
+            st.markdown("</div>", unsafe_allow_html=True)
+        else:
+            st.text_area("Blog Content (raw)", blog_content, height=420, key="blog_raw")
 
-                st.success(f"✅ Deployed to github.com/{owner}/{repo}")
-                st.balloons()
+    st.success("🎉 Research Letter and Blog Post ready for use!")
+    st.balloons()
 
 
-# ====================================================
-# R2 — Workshop / Event Planner (with Google Forms)
-# ====================================================
-def render_workshop():
-    W = st.session_state.workshop
+# =========================
+# Feature 3: Research Letter & Blog (FIXED: always displays after 4th tick)
+# =========================
+if feature == "📬 Research Letter & Blog":
+    st.markdown(
+        """
+    <div class="info-card">
+        <h3>📬 Research Letter & Blog Generator</h3>
+        <p>Transform any topic into professional research letters and blog posts with citations</p>
+    </div>
+    """,
+        unsafe_allow_html=True,
+    )
 
-    st.header("🎤 Workshop / Event Planner")
-    today = dt.date.today()
-    today_str = today.strftime("%Y-%m-%d")
-    today_readable = today.strftime("%B %d, %Y")
-    current_weekday = today.strftime("%A")
-    st.info(f"📅 Today is {current_weekday}, {today_readable}")
-    date_context = f"Today's date is {today_str} ({current_weekday}, {today_readable}). Use this as the reference point for scheduling milestones and deadlines."
+    # Inputs
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        research_topic = st.text_input(
+            "Research Topic",
+            placeholder="e.g., Latest AI trends in healthcare, Blockchain in supply chain...",
+            key="research_topic",
+        )
+        # save for ZIP meta
+  
+    with col2:
+        st.write("")
+        st.write("")
 
-    c1, c2 = st.columns(2)
-    goal       = c1.text_input("Goal", "1-day AI workshop in 10 days")
-    audience   = c1.text_input("Audience", "high-school students")
-    constraints= c2.text_area("Constraints", "budget < $200; 25 attendees; include consent forms")
+    # ---------- Local helpers (Feature 3) ----------
+    def _normalize_letter_blog(assets_data):
+        """Return (letter_text, blog_text) from various asset shapes (dict/object)."""
+        letter_content, blog_content = "", ""
+        if assets_data is None:
+            return letter_content, blog_content
 
-    def badge(ok, label): return f"{'✅' if ok else '⏳'} {label}"
-    st.markdown(f"**Workflow:** {badge(bool(W['research']),'Research')} → {badge(bool(W['plan']),'Plan')} → {badge(bool(W['assets']),'Assets')}")
+        # Normalize
+        if hasattr(assets_data, "model_dump"):
+            assets = assets_data.model_dump()
+        elif hasattr(assets_data, "dict"):
+            assets = assets_data.dict()
+        else:
+            assets = assets_data
 
-    b1, b2, b3, b4 = st.columns([1,1,1,1])
+        if isinstance(assets, dict):
+            letter_content = str(
+                assets.get("letter_content")
+                or assets.get("letter")
+                or assets.get("email_text")
+                or ""
+            )
+            blog_content = str(
+                assets.get("blog_content")
+                or assets.get("blog")
+                or assets.get("post_markdown")
+                or ""
+            )
+        else:
+            letter_content = str(
+                getattr(assets_data, "letter_content", "")
+                or getattr(assets_data, "letter", "")
+                or getattr(assets_data, "email_text", "")
+            )
+            blog_content = str(
+                getattr(assets_data, "blog_content", "")
+                or getattr(assets_data, "blog", "")
+                or getattr(assets_data, "post_markdown", "")
+            )
 
-    # ---- Research ----
-    if b1.button("1) Research", key="wk_research"):
-        with st.spinner("Researching…"):
-            raw = r2_make_research(goal, audience, constraints, date_context)
-            W["research"] = normalize_r2_research(raw, f"{goal}\n{audience}\n{constraints}")
-        r = W["research"]
-        topics = _safe_get(r, "topics", default=[]) or []
-        risks  = _safe_get(r, "risks",  default=[]) or []
-        st.success(f"Research completed: identified {len(topics)} topics and {len(risks)} risks.")
-        if topics: st.write("Top topics:", ", ".join(map(str, topics[:5])))
+        # Properly unescape literals
+        if letter_content:
+            letter_content = letter_content.replace("\\n", "\n").replace("\\t", "\t")
+        if blog_content:
+            blog_content = blog_content.replace("\\n", "\n").replace("\\t", "\t")
+        return letter_content, blog_content
 
-    # ---- Plan ----
-    if b2.button("2) Plan", key="wk_plan"):
-        with st.spinner("Planning…"):
-            raw = r2_make_plan(goal, audience, constraints, date_context)
-            W["plan"] = normalize_r2_plan(raw)
-        p = W["plan"]
-        agenda     = _safe_get(p, "agenda", default=[]) or []
-        milestones = _safe_get(p, "milestones", default=[]) or []
-        metrics    = _safe_get(p, "success_metrics", default=[]) or []
-        st.success(f"Plan created: {len(agenda)} agenda items, {len(milestones)} milestones, and {len(metrics)} success metrics.")
-        if milestones:
-            first_title = _safe_get(milestones[0], "title", default="(untitled)")
-            first_due   = _safe_get(milestones[0], "due",   default="TBD")
-            st.write(f"First milestone: **{first_title}** — due **{first_due}**.")
-
-    # ---- Assets + Google Form ----
-    if b3.button("3) Produce Assets", key="wk_assets"):
-        with st.spinner("Producing…"):
-            raw_assets = r2_make_assets(goal, audience, constraints, W.get("plan"), W.get("research"), date_context)
-            W["assets"] = normalize_r2_assets(raw_assets)
-
-            form_info = {}
-            try:
-                form_info = r2_create_google_form(goal, audience) or {}
-            except Exception:
-                form_info = {}
-            gform_url = form_info.get("responderUrl") or form_info.get("editUrl")
-            if gform_url:
-                if isinstance(W["assets"], dict):
-                    W["assets"]["google_form_url"] = gform_url
-                else:
-                    setattr(W["assets"], "google_form_url", gform_url)
-
-        a = W["assets"]
-        invite = _safe_get(a, "invite_email", "invite", "email")
-        poster = _safe_get(a, "poster_text", "poster")
-        checklist = _safe_get(a, "checklist")
-        pieces = sum(1 for x in [invite, poster, checklist] if x)
-        st.success(f"Assets generated: {pieces} content pieces." + (f" Registration form is ready: { _safe_get(a,'google_form_url') }" if _safe_get(a, "google_form_url") else ""))
-
-    # ---- Reset ----
-    if b4.button("🧹 Reset", key="wk_reset"):
-        W["research"] = W["plan"] = W["assets"] = None
-        st.rerun()
-
-    # ---- Research display ----
-    if W["research"]:
-        r = W["research"]
-        st.subheader("🔎 Research")
-        st.markdown("**Topics:**")
-        for t in _safe_get(r, "topics", default=[]) or []: st.markdown(f"- {t}")
-        st.markdown("**Risks:**")
-        for rr in _safe_get(r, "risks", default=[]) or []:
-            if isinstance(rr, dict):
-                st.markdown(f"- {rr.get('risk')} → Mitigation: {rr.get('mitigation')}")
-            else:
-                st.markdown(f"- {rr}")
-        notes = _safe_get(r, "budget_notes")
-        if notes: st.markdown("**Budget Notes:**"); st.info(notes)
-
-    # ---- Plan display ----
-    if W["plan"]:
-        p = W["plan"]
-        st.subheader("📅 Plan")
-        st.markdown("**Agenda:**")
-        for a in _safe_get(p, "agenda", default=[]) or []: st.markdown(f"- {a}")
-        milestones = _safe_get(p, "milestones", default=[]) or []
-        for i, m in enumerate(milestones, 1):
-            due = _safe_get(m, "due")
-            try:
-                milestone_date = dt.datetime.strptime(str(due), "%Y-%m-%d").date()
-                days_from_today = (milestone_date - dt.date.today()).days
-                if   days_from_today == 0: txt = " (📍 **TODAY**)"
-                elif days_from_today == 1: txt = " (📅 **TOMORROW**)"
-                elif days_from_today > 0:  txt = f" (⏰ in {days_from_today} days)"
-                else:                      txt = f" (⚠️ {abs(days_from_today)} days overdue)"
-            except Exception:
-                txt = ""
-            title = _safe_get(m, "title", default=f"Milestone {i}")
-            st.markdown(f"**Milestone {i}: {title} (Due {due}{txt})**")
-            for t in _safe_get(m, "tasks", default=[]) or []:
-                desc = _safe_get(t, "desc"); hrs = _safe_get(t, "effort_hrs")
-                st.markdown(f" - {desc} ({hrs} hrs)")
-
-        st.markdown("**Success Metrics:**")
-        for m in _safe_get(p, "success_metrics", default=[]) or []: st.markdown(f"- {m}")
-
-    # ---- Assets display & downloads ----
-    if W["assets"]:
-        a = W["assets"]
-        st.subheader("📢 Assets")
-        inv = _safe_get(a, "invite_email", "invite", "email")
-        poster_text = _safe_get(a, "poster_text", "poster")
-        checklist = _safe_get(a, "checklist")
-        st.write(f"Invite email length: {len(inv.split()) if inv else 0} words.")
-        st.write(f"Poster text length: {len(poster_text.split()) if poster_text else 0} words.")
-        st.write(f"Checklist items: {len(checklist.splitlines()) if checklist else 0}.")
-        st.markdown("**Invite Email:**"); st.code(inv or "")
-        st.markdown("**Poster Text:**");  st.code(poster_text or "")
-        st.markdown("**Checklist:**");    st.code(checklist or "")
-
-        gform = _safe_get(a, "google_form_url")
-        if gform:
-            st.markdown("**📋 Registration Form:**")
-            st.markdown(f"🔗 [Open Form]({gform})")
-            st.text_input("Form URL (copy this):", value=str(gform), key="form_url_copy")
-
+    def _build_research_zip(letter_text: str, blog_text: str, topic: str):
+        """Create a ZIP bytes payload of outputs."""
+        import io, zipfile
         buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-            z.writestr("invite_email.md", inv or "")
-            z.writestr("poster.txt",     poster_text or "")
-            z.writestr("checklist.md",   checklist or "")
-            context = (f"Workshop Planning Session\nGenerated on: {dt.date.today().strftime('%B %d, %Y')}\n"
-                       f"Reference Date: {dt.date.today().strftime('%Y-%m-%d')}\n"
-                       f"Day of Week: {dt.date.today().strftime('%A')}\n")
-            z.writestr("planning_date_context.txt", context)
-            if gform: z.writestr("google_form_url.txt", str(gform))
-        st.download_button("⬇️ Download Assets Pack (.zip)", buf.getvalue(), "workshop-assets.zip")
+        with zipfile.ZipFile(buf, "w") as zf:
+            if letter_text:
+                zf.writestr("research_letter.txt", letter_text)
+            if blog_text:
+                zf.writestr("blog_post.txt", blog_text)
+            meta = f"Topic: {topic or 'N/A'}\nGenerated: {dt.date.today()}\n"
+            zf.writestr("meta.txt", meta)
+        buf.seek(0)
+        return buf.getvalue()
 
-        # Deliver (.ics)
-        if ICS_AVAILABLE and W["plan"]:
-            cal = Calendar()
-            for i, m in enumerate(_safe_get(W["plan"], "milestones", default=[]) or [], 1):
-                e = Event()
-                e.name = f"Milestone {i}: {_safe_get(m, 'title', default='')}"
-                due = _safe_get(m, "due", default="")
-                try:
-                    dt_obj = dt.datetime.strptime(str(due), "%Y-%m-%d")
-                    e.begin = dt_obj.replace(hour=9, minute=0); e.make_all_day()
-                except Exception:
-                    e.begin = f"{due} 09:00"; e.make_all_day()
-                cal.events.add(e)
-            st.download_button("📆 Download milestones.ics", str(cal).encode("utf-8"), "workshop-milestones.ics")
+    # Generate button + 4-step flow
+    if st.button("🚀 Generate Research Content", type="primary", use_container_width=True):
+        if not research_topic:
+            st.error("Please enter a research topic!")
+        else:
+            date_context = f"Today's date is {dt.date.today().strftime('%Y-%m-%d')}"
+            try:
+                with st.spinner("Step 1/4: Researching topic..."):
+                    research_content = make_research_for_letter(research_topic, date_context)
+                    st.session_state.research_blog["research_content"] = research_content
+                    st.success("✅ Research completed")
 
-# ======================
-# Router (sidebar)
-# ======================
-section = st.sidebar.radio("Choose module", ["🚀 Launch Builder (R1)", "🎤 Workshop Planner (R2)"])
-if section.startswith("🚀"):
-    render_launch()
-else:
-    render_workshop()
+                with st.spinner("Step 2/4: Planning letter structure..."):
+                    letter_structure = make_research_letter(
+                        research_topic, research_content, date_context
+                    )
+                    st.session_state.research_blog["letter_structure"] = letter_structure
+                    st.success("✅ Letter planned")
+
+                with st.spinner("Step 3/4: Planning blog structure..."):
+                    blog_structure = make_blog_post(
+                        research_topic, research_content, date_context
+                    )
+                    st.session_state.research_blog["blog_structure"] = blog_structure
+                    st.success("✅ Blog planned")
+
+                with st.spinner("Step 4/4: Generating final content..."):
+                    final_assets = generate_final_assets(
+                        research_topic, letter_structure, blog_structure, date_context
+                    )
+                    st.session_state.research_blog["final_assets"] = final_assets
+
+                # Build ZIP directly from whatever came back (download-first UX)
+                letter_text, blog_text = _normalize_letter_blog(final_assets)
+                zip_bytes = _build_research_zip(letter_text, blog_text, research_topic)
+
+                st.success("✅ Content generated!")
+                st.download_button(
+                    "📦 Download Research Pack (ZIP)",
+                    zip_bytes,
+                    file_name=f"research_pack_{dt.date.today().strftime('%Y%m%d')}.zip",
+                    mime="application/zip",
+                    use_container_width=True,
+                    key="zip_download_inline",
+                )
+
+            except Exception as e:
+                st.error(f"Generation failed: {str(e)}")
+
+    # --- DISPLAY (always runs while in this feature) ---
+    assets_data = st.session_state.research_blog.get("final_assets")
+    if assets_data:
+        # Show content inline
+        _render_research_outputs(assets_data)
+
+        # Also offer the ZIP download
+        lt, bt = _normalize_letter_blog(assets_data)
+        zip_bytes = _build_research_zip(lt, bt, research_topic)
+        st.download_button(
+            "📦 Download Research Pack (ZIP)",
+            zip_bytes,
+            file_name=f"research_pack_{dt.date.today().strftime('%Y%m%d')}.zip",
+            mime="application/zip",
+            use_container_width=True,
+            key="zip_download_persistent",
+        )
+    else:
+        st.info("Run the generator above to produce a research letter, blog post, and ZIP bundle.")
+
+
+# =========================
+# Footer
+# =========================
+st.markdown("---")
+st.markdown(
+    """
+<div style="text-align: center; padding: 2rem; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 12px; color: white;">
+  <h3 style="margin: 0;">AI Project Hub</h3>
+  <p style="margin: 0.5rem 0 0 0; opacity: 0.9;">Landing Pages • Workshop Planning • Research Content</p>
+</div>
+""",
+    unsafe_allow_html=True,
+)

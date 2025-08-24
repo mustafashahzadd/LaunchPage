@@ -12,7 +12,7 @@ SCOPES = [
 
 # Token storage
 TOKEN_FILE = "token.pkl"
-CREDENTIALS_FILE = "credentials.json" # Downloaded from Google Cloud Console
+CREDENTIALS_FILE = "credentials.json" # Downloaded from Google Clouad Console
 
 def get_credentials():
     """Load or request OAuth credentials."""

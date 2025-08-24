@@ -2,7 +2,7 @@
 import json
 import re
 from typing import Dict, Any, Optional, List
-from groq import Groq
+from openai import OpenAI 
 
 # ---------------------------
 # Utilities
@@ -78,39 +78,75 @@ def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
 # ---------------------------
 
 def make_landing_assets(api_key: str, product: str, audience: str,
-                        brief: str, research: dict, plan: dict) -> dict:
+                        brief: str, research: dict | str, plan: dict | str) -> dict:
     """
     Calls the model to produce landing page assets as JSON.
-    Returns a dict of files like:
-      {
-        "index.html": "...",
-        "styles.css": "...",
-        "script.js": "...",
-        "README.md": "...",
-        "DEPLOY.md": "..."
-      }
+    Accepts research/plan as dict **or** Markdown strings.
     """
-    client = Groq(api_key=api_key)
+    client = OpenAI(api_key=api_key)
 
-    hooks = research.get("hooks", [])[:5]
-    keywords = research.get("keywords", [])[:8]
-    sections = plan.get("copy_outline", ["Hero", "Quickstart", "Features", "FAQ", "Footer"])
-    repo = plan.get("repo", {})
+    import re
+
+    def _section(md: str, title: str) -> str:
+        """Return text under a markdown heading until the next heading or end."""
+        # matches '# Hooks' or '## Hooks' etc, case-insensitive
+        pat = rf"(?mi)^\s*#{1,6}\s*{re.escape(title)}\s*\n(.*?)(?=^\s*#|\Z)"
+        m = re.search(pat, md)
+        return (m.group(1).strip() if m else "").strip()
+
+    def _bullets(md_block: str) -> list[str]:
+        """Parse -/• bullets into a list."""
+        lines = []
+        for line in md_block.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            line = re.sub(r"^[-*•]\s*", "", line)
+            lines.append(line)
+        return lines
+
+    # ------- research: dict OR markdown -------
+    if isinstance(research, dict):
+        hooks = (research.get("hooks") or [])[:5]
+        keywords = (research.get("keywords") or [])[:8]
+    else:
+        text = str(research)
+        hooks_blk = _section(text, "Hooks")
+        keys_blk  = _section(text, "Keywords")
+        hooks = _bullets(hooks_blk)[:5]
+        # keywords are requested as a single comma-separated line in research.py
+        if keys_blk:
+            first_line = keys_blk.splitlines()[0]
+            keywords = [k.strip() for k in first_line.split(",") if k.strip()][:8]
+        else:
+            keywords = []
+
+    # ------- plan: dict OR markdown -------
+    if isinstance(plan, dict):
+        sections = plan.get("copy_outline", []) or ["Hero", "Quickstart", "Features", "FAQ", "Footer"]
+        repo     = plan.get("repo", {}) or {}
+    else:
+        ptext    = str(plan)
+        outline  = _section(ptext, "Copy Outline") or _section(ptext, "Copy Outline —")
+        sections = _bullets(outline) or ["Hero", "Quickstart", "Features", "FAQ", "Footer"]
+        repo     = {}  # not present in the plain-English plan
 
     system_msg = (
         "You are a code generator that must return ONLY valid JSON.\n"
         "Schema:\n"
         "{\n"
-        '  "files": {\n'
-        '    "index.html": "<HTML5 string>",\n'
-        '    "styles.css": "<CSS string>",\n'
-        '    "script.js": "<JS string>",\n'
-        '    "README.md": "<Markdown string>",\n'
-        '    "DEPLOY.md": "<Markdown string>"\n'
+        '  \"files\": {\n'
+        '    \"index.html\": \"<HTML5 string>\",\n'
+        '    \"styles.css\": \"<CSS string>\",\n'
+        '    \"script.js\": \"<JS string>\",\n'
+        '    \"README.md\": \"<Markdown string>\",\n'
+        '    \"DEPLOY.md\": \"<Markdown string>\"\n'
         "  }\n"
         "}\n"
         "No comments, no trailing commas, no prose before/after. JSON only."
     )
+    # (…keep the rest of the function unchanged…)
+
 
     user_msg = f"""Create a developer-focused landing page.
 
@@ -134,18 +170,13 @@ Requirements:
 Return ONLY JSON using the schema above.
 """
 
-    response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[
-            {"role": "system", "content": system_msg},
-            {"role": "user", "content": user_msg},
-        ],
-        temperature=0.2,
-        max_tokens=4000,
-    )
+    resp = client.responses.create(
+    model="gpt-5",
+    input=f"{system_msg}\n\n{user_msg}",
+   
+)
+    raw = (resp.output_text or "").strip()
 
-    raw = response.choices[0].message.content or ""
-    raw = raw.strip()
 
     # Try to extract JSON robustly
     obj = _extract_json_object(raw)
@@ -212,11 +243,23 @@ jobs:
 
 
 def generate_custom_file(api_key: str, file_type: str, prompt: str,
-                         product: str, research: dict) -> str:
+                         product: str, research: dict | str) -> str:
     """Generate a custom file based on user prompt."""
-    client = Groq(api_key=api_key)
+    client = OpenAI(api_key=api_key)
 
-    keywords = ", ".join(research.get("keywords", [])[:5])
+    # ----- keywords from research: dict OR markdown string -----
+    if isinstance(research, dict):
+        kw_list = (research.get("keywords", []) or [])[:5]
+    else:
+        text = str(research)
+        # pull the first line under a "Keywords" heading and split by commas
+        m = re.search(r"(?mi)^\s*#{1,6}\s*Keywords\s*\n(.*)", text)
+        if m:
+            first_line = m.group(1).strip()
+            kw_list = [k.strip() for k in first_line.split(",") if k.strip()][:5]
+        else:
+            kw_list = []
+    keywords = ", ".join(kw_list)
 
     type_instructions = {
         "HTML": "Generate semantic HTML5 code with proper structure.",
@@ -224,27 +267,10 @@ def generate_custom_file(api_key: str, file_type: str, prompt: str,
         "JS": "Generate vanilla JavaScript ES6+ code.",
     }
 
-    response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[
-            {
-                "role": "system",
-                "content": f"{type_instructions.get(file_type, 'Generate code')} "
-                           f"Return ONLY the code, no explanations or fences."
-            },
-            {
-                "role": "user",
-                "content": f"""Create {file_type} for {product}.
-User request: {prompt}
-Keywords: {keywords}
+    resp = client.responses.create(
+    model="gpt-5",
+    input="Return ONLY the code (no comments, no fences).",
+)
 
-Return ONLY the code (no comments, no fences).
-"""
-            },
-        ],
-        temperature=0.2,
-        max_tokens=2000,
-    )
-
-    content = response.choices[0].message.content or ""
+    content = (resp.output_text or "")
     return clean_markdown(content)

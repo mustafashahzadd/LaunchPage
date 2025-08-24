@@ -1,8 +1,10 @@
 import os
 from typing import Optional, Any
-from langchain_groq import ChatGroq
+# from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from schema_workshop import WorkshopResearch  # <- correct schema module
+import streamlit as st
+from langchain_openai import ChatOpenAI
 
 def _resolve_creds(
     api_key: Optional[str],
@@ -34,8 +36,12 @@ def make_workshop_research(
     """Research topics/risks/budget using ChatGroq; reads key from secrets.toml if present."""
     api_key, model = _resolve_creds(api_key, model, default_model="llama-3.1-8b-instant")
 
-    llm = ChatGroq(api_key=api_key, model=model, temperature=temperature)
-    structured_llm = llm.with_structured_output(WorkshopResearch)
+    llm = ChatOpenAI(
+    api_key=st.secrets["OPENAI_API_KEY"],
+    model=st.secrets.get("OPENAI_MODEL_PRODUCER", "gpt-5"),
+    temperature=0.25,
+)
+    structured_llm = llm.with_structured_output(WorkshopResearch, strict=True)
 
     prompt = ChatPromptTemplate.from_messages([
     ("system",

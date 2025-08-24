@@ -10,3 +10,11 @@ google-auth>=2.34.0
 google-auth-oauthlib>=1.2.0
 google-api-python-client>=2.141.0
 google-auth-httplib2>=0.2.0
+langchain>=0.2
+python-dotenv
+httplib2==0.22.0
+langchain-openai>=0.2.0
+openai>=1.30.0
+langchain>=0.2.0
+langchain-core>=0.2.0
+pydantic>=2.5
